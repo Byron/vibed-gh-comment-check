@@ -4,6 +4,14 @@ use reqwest::Client;
 use serde_json::Value;
 use std::process::{self, Command as ProcessCommand};
 
+#[derive(Debug)]
+struct PrCommentCounts {
+    pr_number: u32,
+    pr_comments: u32,
+    review_comments: u32,
+    issue_comments: u32,
+}
+
 #[tokio::main]
 async fn main() {
     if let Err(e) = run_app().await {
@@ -92,6 +100,33 @@ async fn run_app() -> Result<()> {
     run(token, minutes, additional, &repository, pr_numbers).await
 }
 
+async fn process_single_pr(
+    client: &Client,
+    token: &str,
+    owner: &str,
+    repo: &str,
+    pr_number: u32,
+    user_login: &str,
+) -> Result<PrCommentCounts> {
+    // Run all three comment fetching operations in parallel for this PR
+    let (pr_comments, review_comments, issue_comments) = tokio::try_join!(
+        get_pr_comments(client, token, owner, repo, pr_number),
+        get_review_comments(client, token, owner, repo, pr_number),
+        get_issue_comments(client, token, owner, repo, pr_number)
+    )?;
+
+    let pr_comment_count = count_user_comments(&pr_comments, user_login);
+    let review_comment_count = count_user_comments(&review_comments, user_login);
+    let issue_comment_count = count_user_comments(&issue_comments, user_login);
+
+    Ok(PrCommentCounts {
+        pr_number,
+        pr_comments: pr_comment_count,
+        review_comments: review_comment_count,
+        issue_comments: issue_comment_count,
+    })
+}
+
 async fn run(token: &str, minutes: u32, additional: u32, repository: &str, pr_numbers: Vec<u32>) -> Result<()> {
     let client = Client::new();
     
@@ -103,29 +138,36 @@ async fn run(token: &str, minutes: u32, additional: u32, repository: &str, pr_nu
     let (owner, repo) = parse_repository_url(repository)?;
     println!("Repository: {}/{}", owner, repo);
     
+    // Create futures for processing all PRs in parallel
+    let pr_futures: Vec<_> = pr_numbers
+        .iter()
+        .map(|&pr_number| {
+            let client = &client;
+            let token = token;
+            let owner = &owner;
+            let repo = &repo;
+            let user_login = &user_login;
+            async move {
+                process_single_pr(client, token, owner, repo, pr_number, user_login).await
+            }
+        })
+        .collect();
+    
+    // Run all PR processing in parallel
+    let pr_results = futures::future::try_join_all(pr_futures).await?;
+    
     let mut total_comments = 0;
     
-    for pr_number in pr_numbers {
-        println!("\nAnalyzing PR #{}: https://github.com/{}/{}/pull/{}", pr_number, owner, repo, pr_number);
+    // Display results for each PR
+    for result in &pr_results {
+        println!("\nAnalyzing PR #{}: https://github.com/{}/{}/pull/{}", result.pr_number, owner, repo, result.pr_number);
         
-        // Get PR comments
-        let pr_comments = get_pr_comments(&client, token, &owner, &repo, pr_number).await?;
-        let pr_comment_count = count_user_comments(&pr_comments, &user_login);
-        
-        // Get review comments
-        let review_comments = get_review_comments(&client, token, &owner, &repo, pr_number).await?;
-        let review_comment_count = count_user_comments(&review_comments, &user_login);
-        
-        // Get issue comments (PRs are issues in GitHub API)
-        let issue_comments = get_issue_comments(&client, token, &owner, &repo, pr_number).await?;
-        let issue_comment_count = count_user_comments(&issue_comments, &user_login);
-        
-        let pr_total = pr_comment_count + review_comment_count + issue_comment_count;
+        let pr_total = result.pr_comments + result.review_comments + result.issue_comments;
         total_comments += pr_total;
         
-        println!("  PR comments: {}", pr_comment_count);
-        println!("  Review comments: {}", review_comment_count);
-        println!("  Issue comments: {}", issue_comment_count);
+        println!("  PR comments: {}", result.pr_comments);
+        println!("  Review comments: {}", result.review_comments);
+        println!("  Issue comments: {}", result.issue_comments);
         println!("  Total for this PR: {}", pr_total);
     }
     
