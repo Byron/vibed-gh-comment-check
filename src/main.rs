@@ -35,6 +35,15 @@ async fn main() {
                 .index(1),
         )
         .arg(
+            Arg::new("additional")
+                .short('a')
+                .long("additional")
+                .value_name("ADDITIONAL")
+                .help("Additional comment count to add unconditionally to the total")
+                .value_parser(clap::value_parser!(u32))
+                .default_value("0"),
+        )
+        .arg(
             Arg::new("pr_numbers")
                 .value_name("PR_NUMBERS")
                 .help("PR numbers to analyze")
@@ -46,6 +55,7 @@ async fn main() {
 
     let token = matches.get_one::<String>("token").unwrap();
     let minutes = *matches.get_one::<u32>("minutes").unwrap();
+    let additional = *matches.get_one::<u32>("additional").unwrap();
     let repository = matches.get_one::<String>("repository").unwrap();
     let pr_numbers: Vec<u32> = matches
         .get_many::<String>("pr_numbers")
@@ -53,13 +63,13 @@ async fn main() {
         .map(|s| s.parse().expect("Invalid PR number"))
         .collect();
 
-    if let Err(e) = run(token, minutes, repository, pr_numbers).await {
+    if let Err(e) = run(token, minutes, additional, repository, pr_numbers).await {
         eprintln!("Error: {}", e);
         process::exit(1);
     }
 }
 
-async fn run(token: &str, minutes: u32, repository: &str, pr_numbers: Vec<u32>) -> Result<(), Box<dyn Error>> {
+async fn run(token: &str, minutes: u32, additional: u32, repository: &str, pr_numbers: Vec<u32>) -> Result<(), Box<dyn Error>> {
     let client = Client::new();
     
     // First, get the authenticated user's login
@@ -98,6 +108,11 @@ async fn run(token: &str, minutes: u32, repository: &str, pr_numbers: Vec<u32>) 
     
     println!("\n=== SUMMARY ===");
     println!("Total comments across all PRs: {}", total_comments);
+    if additional > 0 {
+        println!("Additional comments: {}", additional);
+        total_comments += additional;
+        println!("Total comments (including additional): {}", total_comments);
+    }
     println!("Total time: {} minutes", minutes);
     
     if total_comments > 0 {
