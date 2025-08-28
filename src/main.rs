@@ -28,40 +28,52 @@ async fn main() {
                 .value_parser(clap::value_parser!(u32)),
         )
         .arg(
-            Arg::new("urls")
-                .short('u')
-                .long("urls")
-                .value_name("URLS")
-                .help("Comma-separated list of PR URLs")
+            Arg::new("repository")
+                .value_name("REPOSITORY")
+                .help("GitHub repository URL (e.g., https://github.com/owner/repo)")
                 .required(true)
-                .value_delimiter(','),
+                .index(1),
+        )
+        .arg(
+            Arg::new("pr_numbers")
+                .value_name("PR_NUMBERS")
+                .help("PR numbers to analyze")
+                .required(true)
+                .num_args(1..)
+                .index(2),
         )
         .get_matches();
 
     let token = matches.get_one::<String>("token").unwrap();
     let minutes = *matches.get_one::<u32>("minutes").unwrap();
-    let urls: Vec<&String> = matches.get_many::<String>("urls").unwrap().collect();
+    let repository = matches.get_one::<String>("repository").unwrap();
+    let pr_numbers: Vec<u32> = matches
+        .get_many::<String>("pr_numbers")
+        .unwrap()
+        .map(|s| s.parse().expect("Invalid PR number"))
+        .collect();
 
-    if let Err(e) = run(token, minutes, urls).await {
+    if let Err(e) = run(token, minutes, repository, pr_numbers).await {
         eprintln!("Error: {}", e);
         process::exit(1);
     }
 }
 
-async fn run(token: &str, minutes: u32, urls: Vec<&String>) -> Result<(), Box<dyn Error>> {
+async fn run(token: &str, minutes: u32, repository: &str, pr_numbers: Vec<u32>) -> Result<(), Box<dyn Error>> {
     let client = Client::new();
     
     // First, get the authenticated user's login
     let user_login = get_authenticated_user(&client, token).await?;
     println!("Analyzing comments for user: {}", user_login);
     
+    // Parse the repository URL to get owner and repo
+    let (owner, repo) = parse_repository_url(repository)?;
+    println!("Repository: {}/{}", owner, repo);
+    
     let mut total_comments = 0;
     
-    for url in urls {
-        println!("\nAnalyzing PR: {}", url);
-        
-        // Parse GitHub PR URL to extract owner, repo, and PR number
-        let (owner, repo, pr_number) = parse_pr_url(url)?;
+    for pr_number in pr_numbers {
+        println!("\nAnalyzing PR #{}: https://github.com/{}/{}/pull/{}", pr_number, owner, repo, pr_number);
         
         // Get PR comments
         let pr_comments = get_pr_comments(&client, token, &owner, &repo, pr_number).await?;
@@ -119,19 +131,18 @@ async fn get_authenticated_user(client: &Client, token: &str) -> Result<String, 
     Ok(login)
 }
 
-fn parse_pr_url(url: &str) -> Result<(String, String, u32), Box<dyn Error>> {
-    // Expected format: https://github.com/owner/repo/pull/123
+fn parse_repository_url(url: &str) -> Result<(String, String), Box<dyn Error>> {
+    // Expected format: https://github.com/owner/repo
     let parts: Vec<&str> = url.trim_end_matches('/').split('/').collect();
     
-    if parts.len() < 7 || parts[2] != "github.com" || parts[5] != "pull" {
-        return Err("Invalid GitHub PR URL format. Expected: https://github.com/owner/repo/pull/123".into());
+    if parts.len() < 5 || parts[2] != "github.com" {
+        return Err("Invalid GitHub repository URL format. Expected: https://github.com/owner/repo".into());
     }
     
     let owner = parts[3].to_string();
     let repo = parts[4].to_string();
-    let pr_number: u32 = parts[6].parse()?;
     
-    Ok((owner, repo, pr_number))
+    Ok((owner, repo))
 }
 
 async fn get_pr_comments(
