@@ -8,8 +8,6 @@ use std::process::{self, Command as ProcessCommand};
 struct PrCommentCounts {
     pr_number: u32,
     pr_comments: u32,
-    review_comments: u32,
-    issue_comments: u32,
 }
 
 #[tokio::main]
@@ -109,21 +107,13 @@ async fn process_single_pr(
     user_login: &str,
 ) -> Result<PrCommentCounts> {
     // Run all three comment fetching operations in parallel for this PR
-    let (pr_comments, review_comments, issue_comments) = tokio::try_join!(
-        get_pr_comments(client, token, owner, repo, pr_number),
-        get_review_comments(client, token, owner, repo, pr_number),
-        get_issue_comments(client, token, owner, repo, pr_number)
-    )?;
-
-    let pr_comment_count = count_user_comments(&pr_comments, user_login);
-    let review_comment_count = count_user_comments(&review_comments, user_login);
-    let issue_comment_count = count_user_comments(&issue_comments, user_login);
+    let pr_comments =
+        get_pr_comments(client, token, owner, repo, pr_number).await?;
+    let pr_comments = count_user_comments(&pr_comments, user_login);
 
     Ok(PrCommentCounts {
         pr_number,
-        pr_comments: pr_comment_count,
-        review_comments: review_comment_count,
-        issue_comments: issue_comment_count,
+        pr_comments,
     })
 }
 
@@ -162,13 +152,10 @@ async fn run(token: &str, minutes: u32, additional: u32, repository: &str, pr_nu
     for result in &pr_results {
         println!("\nAnalyzing PR #{}: https://github.com/{}/{}/pull/{}", result.pr_number, owner, repo, result.pr_number);
         
-        let pr_total = result.pr_comments + result.review_comments + result.issue_comments;
+        let pr_total = result.pr_comments ;
         total_comments += pr_total;
         
         println!("  PR comments: {}", result.pr_comments);
-        println!("  Review comments: {}", result.review_comments);
-        println!("  Issue comments: {}", result.issue_comments);
-        println!("  Total for this PR: {}", pr_total);
     }
     
     println!("\n=== SUMMARY ===");
@@ -288,36 +275,6 @@ async fn get_pr_comments(
 ) -> Result<Vec<Value>> {
     let url = format!(
         "https://api.github.com/repos/{}/{}/pulls/{}/comments",
-        owner, repo, pr_number
-    );
-    
-    get_paginated_comments(client, token, &url).await
-}
-
-async fn get_review_comments(
-    client: &Client,
-    token: &str,
-    owner: &str,
-    repo: &str,
-    pr_number: u32,
-) -> Result<Vec<Value>> {
-    let url = format!(
-        "https://api.github.com/repos/{}/{}/pulls/{}/reviews",
-        owner, repo, pr_number
-    );
-    
-    get_paginated_comments(client, token, &url).await
-}
-
-async fn get_issue_comments(
-    client: &Client,
-    token: &str,
-    owner: &str,
-    repo: &str,
-    pr_number: u32,
-) -> Result<Vec<Value>> {
-    let url = format!(
-        "https://api.github.com/repos/{}/{}/issues/{}/comments",
         owner, repo, pr_number
     );
     
