@@ -2,7 +2,7 @@ use clap::{Arg, Command};
 use reqwest::Client;
 use serde_json::Value;
 use std::error::Error;
-use std::process;
+use std::process::{self, Command as ProcessCommand};
 
 #[tokio::main]
 async fn main() {
@@ -29,10 +29,10 @@ async fn main() {
         )
         .arg(
             Arg::new("repository")
+                .short('r')
+                .long("repository")
                 .value_name("REPOSITORY")
-                .help("GitHub repository URL (e.g., https://github.com/owner/repo)")
-                .required(true)
-                .index(1),
+                .help("GitHub repository (e.g., owner/repo or https://github.com/owner/repo). If not provided, auto-detects from git remote."),
         )
         .arg(
             Arg::new("additional")
@@ -49,21 +49,39 @@ async fn main() {
                 .help("PR numbers to analyze")
                 .required(true)
                 .num_args(1..)
-                .index(2),
+                .index(1),
         )
         .get_matches();
 
     let token = matches.get_one::<String>("token").unwrap();
     let minutes = *matches.get_one::<u32>("minutes").unwrap();
     let additional = *matches.get_one::<u32>("additional").unwrap();
-    let repository = matches.get_one::<String>("repository").unwrap();
+    
+    // Get repository - either from flag or auto-detect
+    let repository = match matches.get_one::<String>("repository") {
+        Some(repo) => repo.clone(),
+        None => {
+            match auto_detect_repository() {
+                Ok(repo) => {
+                    println!("Auto-detected repository: {}", repo);
+                    repo
+                },
+                Err(e) => {
+                    eprintln!("Error: Failed to auto-detect repository: {}", e);
+                    eprintln!("Please specify the repository using -r/--repository flag.");
+                    process::exit(1);
+                }
+            }
+        }
+    };
+    
     let pr_numbers: Vec<u32> = matches
         .get_many::<String>("pr_numbers")
         .unwrap()
         .map(|s| s.parse().expect("Invalid PR number"))
         .collect();
 
-    if let Err(e) = run(token, minutes, additional, repository, pr_numbers).await {
+    if let Err(e) = run(token, minutes, additional, &repository, pr_numbers).await {
         eprintln!("Error: {}", e);
         process::exit(1);
     }
@@ -147,7 +165,23 @@ async fn get_authenticated_user(client: &Client, token: &str) -> Result<String, 
 }
 
 fn parse_repository_url(url: &str) -> Result<(String, String), Box<dyn Error>> {
-    // Expected format: https://github.com/owner/repo
+    // Check if it's a slug format (org/repo)
+    if !url.contains('/') {
+        return Err("Invalid repository format. Expected: org/repo or https://github.com/org/repo".into());
+    }
+    
+    // If it doesn't contain protocol, treat as slug format
+    if !url.starts_with("http") {
+        let parts: Vec<&str> = url.split('/').collect();
+        if parts.len() != 2 {
+            return Err("Invalid repository slug format. Expected: org/repo".into());
+        }
+        let owner = parts[0].to_string();
+        let repo = parts[1].to_string();
+        return Ok((owner, repo));
+    }
+    
+    // Handle full URL format: https://github.com/owner/repo
     let parts: Vec<&str> = url.trim_end_matches('/').split('/').collect();
     
     if parts.len() < 5 || parts[2] != "github.com" {
@@ -158,6 +192,42 @@ fn parse_repository_url(url: &str) -> Result<(String, String), Box<dyn Error>> {
     let repo = parts[4].to_string();
     
     Ok((owner, repo))
+}
+
+fn auto_detect_repository() -> Result<String, Box<dyn Error>> {
+    // Try to get the remote URL of the current branch's HEAD
+    let output = ProcessCommand::new("git")
+        .args(&["config", "--get", "remote.origin.url"])
+        .output()
+        .map_err(|e| format!("Failed to run git command: {}. Make sure git is installed and you're in a git repository.", e))?;
+    
+    if !output.status.success() {
+        return Err("Failed to get git remote URL. Make sure you're in a git repository with a remote origin.".into());
+    }
+    
+    let remote_url = String::from_utf8(output.stdout)
+        .map_err(|e| format!("Invalid UTF-8 in git output: {}", e))?
+        .trim()
+        .to_string();
+    
+    if remote_url.is_empty() {
+        return Err("No remote origin URL found in git repository.".into());
+    }
+    
+    // Convert various git URL formats to GitHub repository format
+    if remote_url.starts_with("git@github.com:") {
+        // SSH format: git@github.com:owner/repo.git
+        let repo_part = remote_url.strip_prefix("git@github.com:").unwrap();
+        let repo_part = repo_part.strip_suffix(".git").unwrap_or(repo_part);
+        return Ok(repo_part.to_string());
+    } else if remote_url.starts_with("https://github.com/") {
+        // HTTPS format: https://github.com/owner/repo.git
+        let repo_part = remote_url.strip_prefix("https://github.com/").unwrap();
+        let repo_part = repo_part.strip_suffix(".git").unwrap_or(repo_part);
+        return Ok(repo_part.to_string());
+    } else {
+        return Err(format!("Unsupported git remote URL format: {}. Only GitHub repositories are supported.", remote_url).into());
+    }
 }
 
 async fn get_pr_comments(
